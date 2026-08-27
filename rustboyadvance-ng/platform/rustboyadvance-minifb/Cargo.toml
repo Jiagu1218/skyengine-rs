@@ -1,0 +1,11 @@
+[package]
+name = "rustboyadvance-minifb"
+version = "0.1.0"
+authors = ["Michel Heily <michelheily@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+rustboyadvance-core = {path = "../../core/"}
+minifb = "0.28.0"
+clap = {version = "4.5.46", features = ["color", "yaml"]}
+bit = "^0.1"

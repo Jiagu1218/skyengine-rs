@@ -1,0 +1,16 @@
+[package]
+name = "skyengine-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+arm7tdmi = { path = "../arm7tdmi" }
+encoding_rs.workspace = true
+flate2.workspace = true
+jpeg-decoder.workspace = true
+midly.workspace = true
+rustysynth.workspace = true
+serde.workspace = true
+symphonia.workspace = true
+thiserror.workspace = true

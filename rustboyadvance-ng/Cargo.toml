@@ -1,0 +1,33 @@
+[workspace]
+members = [
+    "core",
+    "arm7tdmi",
+    "utils",
+    "platform/rustboyadvance-sdl2",
+    "platform/rustboyadvance-libretro",
+    # "platform/rustboyadvance-minifb", - DEPRECATED
+    "platform/rustboyadvance-wasm",
+    "platform/rustboyadvance-jni",
+    "platform/rustboyadvance-term",
+    "fps_bench"
+]
+
+default-members = ["platform/rustboyadvance-sdl2"]
+resolver = "1"
+
+[profile.dev]
+opt-level = 2
+debug = true
+
+[profile.release]
+debug = false
+
+[profile.release-dev]
+inherits = "release"
+opt-level = 3
+debug = true
+debug-assertions = false
+
+[profile.release-lto]
+inherits = "release"
+lto = true

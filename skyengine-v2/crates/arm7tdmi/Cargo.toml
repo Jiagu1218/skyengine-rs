@@ -1,0 +1,24 @@
+[package]
+name = "arm7tdmi"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "[skyengine] Vendored from rustboyadvance-ng/arm7tdmi (commit 8fe45a8a) for MRP guest execution"
+
+[dependencies]
+log = "0.4"
+bit = "0.1.1"
+serde = { version = "1.0", features = ["derive"] }
+num = "0.4"
+num-traits = "0.2"
+enum-primitive-derive = "0.3"
+
+# [skyengine] byteorder only needed by the optional disassembler frontend
+byteorder = { version = "1", optional = true }
+
+[build-dependencies]
+bit = "0.1.1"
+
+[features]
+default = []
+disasm = ["dep:byteorder"]
