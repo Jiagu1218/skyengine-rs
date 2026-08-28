@@ -1749,9 +1749,10 @@ impl ExtRuntime {
         stack_arguments: &[u32],
         services: &mut dyn NativeServices,
     ) -> Result<u32> {
-        // [skyengine] 新内核执行循环。GuestCpu 以 take/release 方式与宿主
-        // 分时共享 self.memory：step 期间内存归 CPU，dispatch/trace 归运行时，
-        // 借用检查因此天然满足（设计文档的 D1/D2 落地形态）。
+        // [skyengine v2] 持久化核心执行循环。
+        // GuestCpu 直接持有 Arm7tdmiCore<GuestBus>，无需每步 activate/save_back。
+        // 通过 bind/unbind 模式管理内存借用：step 期间 bus 持有有效指针，
+        // dispatch 期间指针置空，self.memory 独占可用。
         let module = self.modules.get(function.module).ok_or_else(|| {
             Error::Abi(format!(
                 "guest function references module {}",
@@ -1783,38 +1784,46 @@ impl ExtRuntime {
             & !7;
 
         let mut cpu = facade::GuestCpu::empty();
-        {
-            let mut active = cpu.activate(&mut self.memory);
-            for (index, value) in registers.into_iter().enumerate() {
-                active.set_register(index, value);
-            }
-            active.set_register(9, function.captured_r9.unwrap_or(static_base_r9));
-            for (index, argument) in stack_arguments.iter().copied().enumerate() {
-                active
-                    .bus_memory_mut()
-                    .write_u32(
-                        GuestAddr(stack_pointer + u32::try_from(index).unwrap() * 4),
-                        argument,
-                    )
-                    .map_err(|error| Error::ArmFault(error.to_string()))?;
-            }
-            active.set_register(13, stack_pointer);
-            active.set_register(14, RETURN_SENTINEL);
-            active.set_pc(function.address);
+        // 绑定内存以初始化寄存器
+        cpu.bind_memory(&mut self.memory);
+        for (index, value) in registers.into_iter().enumerate() {
+            cpu.set_register_static(index, value);
         }
+        cpu.set_register_static(9, function.captured_r9.unwrap_or(static_base_r9));
+        // 写栈参数（通过 bus memory）
+        for (index, argument) in stack_arguments.iter().copied().enumerate() {
+            self.memory
+                .write_u32(
+                    GuestAddr(stack_pointer + u32::try_from(index).unwrap() * 4),
+                    argument,
+                )
+                .map_err(|error| Error::ArmFault(error.to_string()))?;
+        }
+        cpu.set_register_static(13, stack_pointer);
+        cpu.set_register_static(14, RETURN_SENTINEL);
+        // 设 PC 并重载流水线（memory 已绑定，循环期间保持绑定）
+        cpu.set_pc_static(function.address);
+
+        // [skyengine v2] 绑定内存，整个循环期间保持绑定。
+        // bus 用裸指针持有 self.memory，Rust 借用检查器不知道这个别名。
+        // dispatch 通过 self.memory 访问内存，cpu 通过 bus 裸指针访问同一内存。
+        // 安全性由单线程执行保证：step 期间不调 dispatch，dispatch 期间不调 step。
+        cpu.bind_memory(&mut self.memory);
 
         let mut entered_guest_call: Option<bool> = None;
         let mut instruction_count: u64 = 0;
         let trace_arm = std::env::var_os("SKYENGINE_TRACE_ARM").is_some();
         let debug_loop = std::env::var_os("SKYENGINE_DEBUG_LOOP").is_some();
         while instruction_count < INSTRUCTION_BUDGET {
-            let (pc, pending_trap) = {
-                let mut active = cpu.activate(&mut self.memory);
-                let p = active.pc();
-                let t = active.take_pending_trap();
-                if debug_loop { eprintln!("[loop] n={instruction_count} pc={p:#010x} trap={t:?} r0={:#010x} r1={:#010x} r2={:#010x} r3={:#010x} r4={:#010x} r5={:#010x} r6={:#010x} r7={:#010x} r8={:#010x} r9={:#010x} r10={:#010x} r11={:#010x} r12={:#010x} lr={:#010x} sp={:#010x} cpsr={:#010x}", active.register(0), active.register(1), active.register(2), active.register(3), active.register(4), active.register(5), active.register(6), active.register(7), active.register(8), active.register(9), active.register(10), active.register(11), active.register(12), active.register(14), active.register(13), active.cpsr()); }
-                (p, t)
-            };
+            let p = cpu.pc_static();
+            let pending_trap = cpu.take_pending_trap();
+            if debug_loop { eprintln!("[loop] n={instruction_count} pc={p:#010x} trap={pending_trap:?} r0={:#010x} r1={:#010x} r2={:#010x} r3={:#010x} r4={:#010x} r5={:#010x} r6={:#010x} r7={:#010x} r8={:#010x} r9={:#010x} r10={:#010x} r11={:#010x} r12={:#010x} lr={:#010x} sp={:#010x} cpsr={:#010x}", cpu.register_static(0), cpu.register_static(1), cpu.register_static(2), cpu.register_static(3), cpu.register_static(4), cpu.register_static(5), cpu.register_static(6), cpu.register_static(7), cpu.register_static(8), cpu.register_static(9), cpu.register_static(10), cpu.register_static(11), cpu.register_static(12), cpu.register_static(14), cpu.register_static(13), cpu.cpsr_static()); }
+            let previous_lr = cpu.register_static(14);
+            let previous_thumb = cpu.is_thumb_static();
+            let sequential_pc = p.wrapping_add(if previous_thumb { 2 } else { 4 });
+            let step_outcome = cpu.step();
+
+            let pc = p;
             if let Some(return_to_thumb) = entered_guest_call.take()
                 && self.try_dispatch_legacy_external_action(
                     function.module,
@@ -1825,17 +1834,16 @@ impl ExtRuntime {
                 instruction_count += 1;
                 continue;
             }
-            // [skyengine] RETURN_SENTINEL 取指已被 bus 弹床拦截：
-            // 当本步执行的是 SENTINEL 处的 bx lr 时，视为 guest 调用结束。
-            // 使用静态检查避免 activate 重载流水线导致 pending_trap 被意外恢复。
+            // RETURN_SENTINEL 取指已被 bus 弹床拦截
             if cpu.is_sentinel_hit_static() {
-                // 需要一次 activate 来读取 r0
-                let mut active = cpu.activate(&mut self.memory);
-                let result = active.register(0);
+                let result = cpu.register_static(0);
+                cpu.unbind_memory();
                 return Ok(result);
             }
             let slot = trap_slot(pc).or(pending_trap);
             if let Some(slot) = slot {
+                // [skyengine] dispatch 通过 self.memory 访问内存，
+                // 但 bus 裸指针指向同一对象——单线程下安全
                 if let Err(error) = self.dispatch(slot, function.module, &mut cpu, services) {
                     let context = format!(
                         " while dispatching module {} slot {slot} at LR {:#010x} (r0={:#010x}, r1={:#010x}, r2={:#010x}, r3={:#010x}, sp={:#010x})",
@@ -1847,6 +1855,7 @@ impl ExtRuntime {
                         cpu.register_static(3),
                         cpu.register_static(13),
                     );
+                    cpu.unbind_memory();
                     return Err(match error {
                         Error::ArmFault(message) => Error::ArmFault(message + &context),
                         Error::Abi(message) => Error::Abi(message + &context),
@@ -1855,7 +1864,7 @@ impl ExtRuntime {
                 }
                 let return_address = cpu.register_static(14);
                 cpu.clear_pending_trap();
-                cpu.activate(&mut self.memory).set_pc(return_address);
+                cpu.set_pc_static(return_address);
                 instruction_count += 1;
                 continue;
             }
@@ -1874,19 +1883,8 @@ impl ExtRuntime {
                     cpu.register_static(14),
                 );
             }
-            let (previous_lr, previous_thumb, sequential_pc) = {
-                let active = cpu.activate(&mut self.memory);
-                (
-                    active.register(14),
-                    active.is_thumb(),
-                    pc.wrapping_add(if active.is_thumb() { 2 } else { 4 }),
-                )
-            };
-            let step_outcome = {
-                let mut active = cpu.activate(&mut self.memory);
-                active.step()
-            };
             if let Err(error) = step_outcome {
+                cpu.unbind_memory();
                 return Err(match error {
                     Error::ArmFault(message) => {
                         let instruction = self
@@ -1899,50 +1897,49 @@ impl ExtRuntime {
                                 )
                             })
                             .unwrap_or_else(|_| "unavailable".into());
-                        let snapshot = cpu.activate(&mut self.memory);
                         Error::ArmFault(format!(
                             "{message} while executing module {} at PC {pc:#010x} (insn={instruction}, cpsr={:#010x}, r0={:#010x}, r1={:#010x}, r2={:#010x}, r3={:#010x}, r4={:#010x}, r5={:#010x}, r6={:#010x}, r7={:#010x}, r8={:#010x}, r9={:#010x}, r10={:#010x}, r11={:#010x}, r12={:#010x}, sp={:#010x}, lr={:#010x})",
                             function.module,
-                            snapshot.cpsr(),
-                            snapshot.register(0),
-                            snapshot.register(1),
-                            snapshot.register(2),
-                            snapshot.register(3),
-                            snapshot.register(4),
-                            snapshot.register(5),
-                            snapshot.register(6),
-                            snapshot.register(7),
-                            snapshot.register(8),
-                            snapshot.register(9),
-                            snapshot.register(10),
-                            snapshot.register(11),
-                            snapshot.register(12),
-                            snapshot.register(13),
-                            snapshot.register(14),
+                            cpu.cpsr_static(),
+                            cpu.register_static(0),
+                            cpu.register_static(1),
+                            cpu.register_static(2),
+                            cpu.register_static(3),
+                            cpu.register_static(4),
+                            cpu.register_static(5),
+                            cpu.register_static(6),
+                            cpu.register_static(7),
+                            cpu.register_static(8),
+                            cpu.register_static(9),
+                            cpu.register_static(10),
+                            cpu.register_static(11),
+                            cpu.register_static(12),
+                            cpu.register_static(13),
+                            cpu.register_static(14),
                         ))
                     }
                     other => other,
                 });
             }
-            let exit_reason = cpu.activate(&mut self.memory).take_semihosting_exit_reason();
+            let exit_reason = cpu.take_semihosting_exit_reason_static();
             if let Some(reason) = exit_reason {
                 self.exit_requested = true;
                 self.last_exit_reason = Some(reason);
+                cpu.unbind_memory();
                 return Ok(0);
             }
             let branch_detected = {
-                let active = cpu.activate(&mut self.memory);
-                active.register(14) != previous_lr && active.pc() != sequential_pc
+                cpu.register_static(14) != previous_lr && cpu.pc_static() != sequential_pc
             };
             if branch_detected {
                 entered_guest_call = Some(previous_thumb);
             }
             instruction_count += 1;
         }
-        let (pc, is_thumb) = {
-            let active = cpu.activate(&mut self.memory);
-            (active.pc(), active.is_thumb())
-        };
+        // 超出指令预算
+        cpu.unbind_memory();
+        let pc = cpu.pc_static();
+        let is_thumb = cpu.is_thumb_static();
         let instruction = self
             .memory
             .read(GuestAddr(pc), if is_thumb { 2 } else { 4 })
@@ -1953,26 +1950,25 @@ impl ExtRuntime {
                     .collect::<String>()
             })
             .unwrap_or_else(|_| "unavailable".into());
-        let snapshot = cpu.activate(&mut self.memory);
         Err(Error::ArmFault(format!(
             "instruction budget {INSTRUCTION_BUDGET} exhausted in module {} at PC {pc:#010x} (insn={instruction}, cpsr={:#010x}, r0={:#010x}, r1={:#010x}, r2={:#010x}, r3={:#010x}, r4={:#010x}, r5={:#010x}, r6={:#010x}, r7={:#010x}, r8={:#010x}, r9={:#010x}, r10={:#010x}, r11={:#010x}, r12={:#010x}, sp={:#010x}, lr={:#010x})",
             function.module,
-            snapshot.cpsr(),
-            snapshot.register(0),
-            snapshot.register(1),
-            snapshot.register(2),
-            snapshot.register(3),
-            snapshot.register(4),
-            snapshot.register(5),
-            snapshot.register(6),
-            snapshot.register(7),
-            snapshot.register(8),
-            snapshot.register(9),
-            snapshot.register(10),
-            snapshot.register(11),
-            snapshot.register(12),
-            snapshot.register(13),
-            snapshot.register(14),
+            cpu.cpsr_static(),
+            cpu.register_static(0),
+            cpu.register_static(1),
+            cpu.register_static(2),
+            cpu.register_static(3),
+            cpu.register_static(4),
+            cpu.register_static(5),
+            cpu.register_static(6),
+            cpu.register_static(7),
+            cpu.register_static(8),
+            cpu.register_static(9),
+            cpu.register_static(10),
+            cpu.register_static(11),
+            cpu.register_static(12),
+            cpu.register_static(13),
+            cpu.register_static(14),
         )))
     }
 

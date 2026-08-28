@@ -36,19 +36,52 @@ pub(crate) struct GuestBusState {
     pub fault: Option<String>,
 }
 
-/// 借用式的客户机总线。生命周期限制在一次 step 会话内，
-/// 内核持有它而主循环保留对 `GuestMemory` 的独占所有权。
-pub(crate) struct GuestBus<'a> {
-    pub(crate) memory: &'a mut GuestMemory,
+/// [skyengine] 持久化客户机总线：用裸指针持有 GuestMemory，
+/// 避免 Arm7tdmiCore 带生命周期参数，从而让 Core 可以持久存
+/// 活在 GuestCpu 内而非每次 activate 重建。
+///
+/// ## 安全性
+/// 裸指针的别名安全由调用方保证：每次 step 期间 GuestCpu 独占
+/// &mut GuestMemory；dispatch 期间 GuestCpu 不活跃（core 不可
+/// 调用 bus 方法）。这与旧版借用式 GuestBus 语义等价，只是绕
+/// 过了 Rust 借用检查器的跨迭代生命周期限制。
+pub(crate) struct GuestBus {
+    pub(crate) memory: *mut GuestMemory,
     pub(crate) state: GuestBusState,
 }
 
-impl<'a> GuestBus<'a> {
-    pub(crate) fn new(memory: &'a mut GuestMemory) -> GuestBus<'a> {
+// 安全：GuestBus 的 MemoryInterface 实现仅通过 &mut self 访问
+// *mut GuestMemory，且每次 step 期间调用方保证独占访问。
+unsafe impl Send for GuestBus {}
+
+impl GuestBus {
+    /// 从可变引用构造。调用方必须保证在 bus 活跃期间
+    /// 没有其他引用访问同一 GuestMemory。
+    pub(crate) fn from_raw(memory: *mut GuestMemory) -> GuestBus {
         GuestBus {
             memory,
             state: GuestBusState::default(),
         }
+    }
+
+    /// 重置状态并更换底层内存指针（用于重新绑定到新的 &mut GuestMemory）
+    pub(crate) fn rebind(&mut self, memory: *mut GuestMemory) {
+        self.memory = memory;
+        self.state = GuestBusState::default();
+    }
+
+    /// 获取内存的可变引用（仅在本 bus 独占期间安全调用）
+    #[inline]
+    fn memory_mut(&mut self) -> &mut GuestMemory {
+        // 安全：调用方保证此期间独占 GuestMemory
+        unsafe { &mut *self.memory }
+    }
+
+    /// 获取内存的共享引用
+    #[inline]
+    fn memory_ref(&self) -> &GuestMemory {
+        // 安全：调用方保证此期间独占 GuestMemory
+        unsafe { &*self.memory }
     }
 
     fn record_fault(&mut self, address: u32, kind: &str, detail: &str) {
@@ -58,10 +91,9 @@ impl<'a> GuestBus<'a> {
     }
 }
 
-impl MemoryInterface for GuestBus<'_> {
+impl MemoryInterface for GuestBus {
     fn load_8(&mut self, addr: u32, _access: MemoryAccess) -> u8 {
-        // 数据读路径无法与取指区分，X 页按可读对待（设计 D6）。
-        match self.memory.read_u8(GuestAddr(addr)) {
+        match self.memory_ref().read_u8(GuestAddr(addr)) {
             Ok(value) => value,
             Err(error) => {
                 self.record_fault(addr, "read8", &error.to_string());
@@ -91,7 +123,7 @@ impl MemoryInterface for GuestBus<'_> {
             // (0x4770)。
             return 0x4770; // Thumb bx lr
         }
-        match self.memory.read_u16(GuestAddr(addr)) {
+        match self.memory_ref().read_u16(GuestAddr(addr)) {
             Ok(value) => value,
             Err(error) => {
                 self.record_fault(addr, "read16", &error.to_string());
@@ -118,7 +150,7 @@ impl MemoryInterface for GuestBus<'_> {
             }
             return TRAMPOLINE_BX_LR;
         }
-        match self.memory.read_u32(GuestAddr(aligned)) {
+        match self.memory_ref().read_u32(GuestAddr(aligned)) {
             Ok(value) => value,
             Err(error) => {
                 self.record_fault(aligned, "read32", &error.to_string());
@@ -128,21 +160,21 @@ impl MemoryInterface for GuestBus<'_> {
     }
 
     fn store_8(&mut self, addr: u32, value: u8, _access: MemoryAccess) {
-        if let Err(error) = self.memory.write_u8(GuestAddr(addr), value) {
+        if let Err(error) = self.memory_mut().write_u8(GuestAddr(addr), value) {
             self.record_fault(addr, "write8", &error.to_string());
         }
     }
 
     fn store_16(&mut self, addr: u32, value: u16, _access: MemoryAccess) {
         let addr = addr & !1;
-        if let Err(error) = self.memory.write_u16(GuestAddr(addr), value) {
+        if let Err(error) = self.memory_mut().write_u16(GuestAddr(addr), value) {
             self.record_fault(addr, "write16", &error.to_string());
         }
     }
 
     fn store_32(&mut self, addr: u32, value: u32, _access: MemoryAccess) {
         let aligned = addr & !3;
-        if let Err(error) = self.memory.write_u32(GuestAddr(aligned), value) {
+        if let Err(error) = self.memory_mut().write_u32(GuestAddr(aligned), value) {
             self.record_fault(aligned, "write32", &error.to_string());
         }
     }

@@ -44,14 +44,14 @@ fn arm_thumb_bx_and_load16_sentinel() {
     // - load_16 returns a valid Thumb instruction (bx lr = 0x4770)
     // - pending_sentinel_hit is set, allowing the step loop to detect the return
     let mut mem = GuestMemory::new();
-    let mut bus = crate::arm::bus::GuestBus::new(&mut mem);
+    let mut bus = crate::arm::bus::GuestBus::from_raw(&mut mem as *mut GuestMemory);
     let val = bus.load_16(0xFFFFFF00, arm7tdmi::memory::MemoryAccess::NonSeq);
     assert_eq!(val, 0x4770, "load_16 at sentinel should return Thumb bx lr (0x4770), got {val:#x}");
     assert!(bus.state.pending_sentinel_hit, "load_16 at sentinel should set pending_sentinel_hit");
 
     // Also test trap window interception via load_16
     let mut mem2 = GuestMemory::new();
-    let mut bus2 = crate::arm::bus::GuestBus::new(&mut mem2);
+    let mut bus2 = crate::arm::bus::GuestBus::from_raw(&mut mem2 as *mut GuestMemory);
     let trap_val = bus2.load_16(crate::arm::bus::BUS_TRAP_BASE, arm7tdmi::memory::MemoryAccess::NonSeq);
     assert_eq!(trap_val, 0x4770, "load_16 at trap base should return Thumb bx lr");
     assert!(bus2.state.pending_trap.is_some(), "load_16 at trap base should set pending_trap");
