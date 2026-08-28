@@ -161,12 +161,25 @@ fn thumb_decode(i: u16) -> (&'static str, String) {
     } else if i & 0xf800 == 0xe000 {
         ("Branch", String::from("exec_thumb_branch"))
     } else if i & 0xf000 == 0xf000 {
+        // [skyengine] BEGIN - ARMv5T Thumb BL/BLX long branch
+        // First halfword (0xF000..0xF7FF): BL high offset → FLAG_LOW_OFFSET=false
+        // Second halfword with H=1 (0xF800..0xFFFF): BL low offset → stays Thumb
+        // Second halfword with H=0 (0xE800..0xEFFF): BLX low offset → switches to ARM
+        // We handle the 0xF000..0xFFFF range here; 0xE800 is decoded below.
+        // NOTE: mask must be 0xf000 (not 0xf800) to cover 0xF800..0xFFFF (BL second halfword).
         (
             "BranchLongWithLink",
             format!(
                 "exec_thumb_branch_long_with_link::<{FLAG_LOW_OFFSET}>",
                 FLAG_LOW_OFFSET = i.bit(11),
             ),
+        )
+    } else if i & 0xf800 == 0xe800 {
+        // [skyengine] ARMv5T BLX (Thumb→ARM): second halfword 11101 imm11
+        // Switches to ARM mode after the long branch.
+        (
+            "BranchLongWithLink",
+            String::from("exec_thumb_blx_arm"),
         )
     } else {
         ("Undefined", String::from("thumb_undefined"))
@@ -275,9 +288,42 @@ fn arm_decode(i: u32) -> (&'static str, String) {
                 // NOTE: this runs against the LUT's re-fabricated instruction
                 // word where all bits outside {27..20} ∪ {7..4} are zeroed,
                 // so the match tests only those stable opcode columns.
-                _ if i & 0x0f00_00f0 == 0x0100_0030 => Some((
+                // FIX: mask must be 0x0ff0_00f0 (not 0x0f00_00f0) so that
+                // bits[27:25]=001 are checked; otherwise MOV r1, r5, LSL #8
+                // (bits[27:20]=0x1a, bits[7:4]=0x3) falsely matches.
+                _ if i & 0x0ff0_00f0 == 0x0120_0030 => Some((
                     "BranchExchange",
                     "exec_arm_blx_reg".to_string(),
+                )),
+                // [skyengine] END
+                // [skyengine] BEGIN - ARMv5TE QADD/QSUB/QDADD/QDSUB
+                // Encoding: cond 0001 00x0 Rm 0000 Rd 0000 01y1 Rn
+                // In LUT key space: bits[27:20]=0x10, bits[7:4]=0x5
+                // Mask: 0x0FF0_00F0 == 0x0100_0050
+                // x=bit23 (DOUBLE), y=bit21 (SUB)
+                _ if i & 0x0ff0_00f0 == 0x0100_0050 => Some((
+                    "SaturatingAddSub",
+                    format!(
+                        "exec_arm_qadd_qsub::<{SUB}, {DOUBLE}>",
+                        SUB = i.bit(21),
+                        DOUBLE = i.bit(23),
+                    ),
+                )),
+                // [skyengine] END
+                // [skyengine] BEGIN - ARMv5TE SMLAxy / SMULWy
+                // SMLAxy: cond 0001 0xx0 Rd Rm x y Rs 1 0 0 0 Rn  (accumulate)
+                //   In LUT key space: bits[27:20]=0x10, bits[7:4]=0x8
+                //   Mask: 0x0FF0_0090 == 0x0100_0080
+                // SMULWy: cond 0001 01x0 Rd Rm 0 0 Rs 1 0 0 0 0  (no accumulate)
+                //   In LUT key space: bits[27:20]=0x16, bits[7:4]=0x8, bits[15:12]=0xF
+                //   Mask: 0x0FF0_F090 == 0x0160_0080
+                _ if i & 0x0ff0_f090 == 0x0160_0080 => Some((
+                    "SignedHalfwordMultiply",
+                    "exec_arm_smlaxy::<false>".to_string(),  // SMULWy (no accumulate)
+                )),
+                _ if i & 0x0ff0_0090 == 0x0100_0080 => Some((
+                    "SignedHalfwordMultiply",
+                    "exec_arm_smlaxy::<true>".to_string(),   // SMLAxy (accumulate)
                 )),
                 // [skyengine] END
                 _ => None,

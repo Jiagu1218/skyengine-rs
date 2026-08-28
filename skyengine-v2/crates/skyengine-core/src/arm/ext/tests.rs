@@ -174,4 +174,5 @@ mod abi;
 mod external_actions;
 mod lifecycle;
 mod services;
+mod spec_verification;
 mod state;

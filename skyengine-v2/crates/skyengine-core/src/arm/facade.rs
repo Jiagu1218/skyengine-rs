@@ -1,24 +1,24 @@
-//! [skyengine] `GuestCpu` 门面：以旧自研 `ArmCpu` 的方法形状驱动 vendored
-//! `Arm7tdmiCore<GuestBus>`。
+//! [skyengine] `GuestCpu` 门面：以旧自�?`ArmCpu` 的方法形状驱�?vendored
+//! `Arm7tdmiCore<GuestBus>`�?
 //!
 //! ## 借用模型
 //!
-//! 宿主服务（dispatch）需要 `&mut ExtRuntime`（memory + 服务状态），而内核
-//! 执行需要 `&mut GuestMemory`。为让借用检查满足且不引入 UnsafeCell：
+//! 宿主服务（dispatch）需�?`&mut ExtRuntime`（memory + 服务状态），而内�?
+//! 执行需�?`&mut GuestMemory`。为让借用检查满足且不引�?UnsafeCell�?
 //!
-//! - `GuestCpu` 在 **非激活态** 只保存寄存器/CPSR 的快照（值语义），
-//!   供 dispatch/trace 自由读取；
-//! - `activate(&mut memory)` 把快照装回 vendored 内核执行一步，
-//!   `Drop` 时把内核最新状态写回快照并释放内存借用。
+//! - `GuestCpu` �?**非激活�?* 只保存寄存器/CPSR 的快照（值语义）�?
+//!   �?dispatch/trace 自由读取�?
+//! - `activate(&mut memory)` 把快照装�?vendored 内核执行一步，
+//!   `Drop` 时把内核最新状态写回快照并释放内存借用�?
 //!
-//! 快照装载/回收每步各一次（约几十 ns），远小于指令本身的解释成本。
+//! 快照装载/回收每步各一次（约几�?ns），远小于指令本身的解释成本�?
 
 use super::bus::GuestBus;
 use crate::arm::memory::GuestMemory;
 use crate::{Error, Result};
 use arm7tdmi::{Arm7tdmiCore, CpuState};
 
-/// 非激活态的寄存器快照：runner 与宿主服务的共享读视图。
+/// 非激活态的寄存器快照：runner 与宿主服务的共享读视图�?
 #[derive(Clone, Debug)]
 struct CpuSnapshot {
     gpr: [u32; 15],
@@ -35,7 +35,7 @@ struct CpuSnapshot {
 
 impl Default for CpuSnapshot {
     fn default() -> Self {
-        // 复刻 arm7tdmi 默认 CPSR (0x0000_00D3)：SVC 态、IRQ/FIQ 关闭、ARM 态。
+        // 复刻 arm7tdmi 默认 CPSR (0x0000_00D3)：SVC 态、IRQ/FIQ 关闭、ARM 态�?
         CpuSnapshot {
             gpr: [0; 15],
             pc: 0,
@@ -51,21 +51,21 @@ impl Default for CpuSnapshot {
     }
 }
 
-/// SWI 宿主消费标记：内核 hook 返回 true 时记录注释值，step 后由 runner 判定。
+/// SWI 宿主消费标记：内�?hook 返回 true 时记录注释值，step 后由 runner 判定�?
 pub(crate) struct GuestCpu {
     snapshot: CpuSnapshot,
-    /// 半宿主 SYS_EXIT 退出原因：step 出口判定后写入，跨 activate 持久。
+    /// 半宿�?SYS_EXIT 退出原因：step 出口判定后写入，�?activate 持久�?
     semihosting_exit_reason: Option<u32>,
-    // ---- 总线信号跨 activate 持久化（bus 本体随每次激活重建） ----
-    /// 陷阱窗口取指记录的槽位。
+    // ---- 总线信号�?activate 持久化（bus 本体随每次激活重建） ----
+    /// 陷阱窗口取指记录的槽位�?
     pending_trap: Option<u32>,
-    /// 取指命中 RETURN_SENTINEL 页（0xffffff00 起）。
+    /// 取指命中 RETURN_SENTINEL 页（0xffffff00 起）�?
     sentinel_hit: bool,
-    /// 本步被宿主消费的 SWI 注释值。
+    /// 本步被宿主消费的 SWI 注释值�?
     pending_swi: Option<u32>,
 }
 
-/// 激活期视图：装回了真实内核。Drop 时状态写回快照。
+/// 激活期视图：装回了真实内核。Drop 时状态写回快照�?
 pub(crate) struct ActiveCpu<'a> {
     outer: &'a mut GuestCpu,
     core: Arm7tdmiCore<GuestBus<'a>>,
@@ -82,13 +82,13 @@ impl GuestCpu {
         }
     }
 
-    /// 非激活读视图（dispatch / trace / 错误上下文用）。
+    /// 非激活读视图（dispatch / trace / 错误上下文用）�?
     pub(crate) fn register_static(&self, index: usize) -> u32 {
         debug_assert_ne!(index, 15);
         self.snapshot.gpr[index]
     }
 
-    /// 非激活写视图（宿主服务写返回值 r0 等）。
+    /// 非激活写视图（宿主服务写返回�?r0 等）�?
     pub(crate) fn set_register_static(&mut self, index: usize, value: u32) {
         debug_assert_ne!(index, 15);
         self.snapshot.gpr[index] = value;
@@ -122,7 +122,20 @@ impl GuestCpu {
         self.snapshot.thumb
     }
 
-    /// 非激活态写 PC：bit0 携带 Thumb 含义（与旧核 set_pc 一致）。
+    /// 非激活态检�?sentinel 是否命中（避�?activate 重载流水线导致陷阱恢复）�?
+    pub(crate) fn is_sentinel_hit_static(&self) -> bool {
+        self.sentinel_hit
+    }
+
+    /// 非激活态清除已消费的陷阱信号�?
+    pub(crate) fn clear_pending_trap(&mut self) {
+        if std::env::var_os("SKYENGINE_DEBUG_LOOP").is_some() {
+            eprintln!("[clear_trap] old={:?}", self.pending_trap);
+        }
+        self.pending_trap = None;
+    }
+
+    /// 非激活态写 PC：bit0 携带 Thumb 含义（与旧核 set_pc 一致）�?
     pub(crate) fn set_pc_static(&mut self, address: u32) {
         self.snapshot.thumb = address & 1 != 0;
         if self.snapshot.thumb {
@@ -133,18 +146,24 @@ impl GuestCpu {
     }
 
 
-    /// 装载内存引用进入激活态。结束时（作用域结束）状态写回快照。
+    /// 装载内存引用进入激活态。结束时（作用域结束）状态写回快照�?
     pub(crate) fn activate<'a>(&'a mut self, memory: &'a mut GuestMemory) -> ActiveCpu<'a> {
         let mut bus = GuestBus::new(memory);
-        // 播种上一步遗留的总线信号（bus 随激活重建，信号必须外置持久）
+        // 播种上一步遗留的总线信号（bus 随激活重建，信号必须外置持久�?
         bus.state.pending_trap = self.pending_trap;
         bus.state.pending_sentinel_hit = self.sentinel_hit;
         bus.state.pending_swi = self.pending_swi;
+        if std::env::var_os("SKYENGINE_DEBUG_LOOP").is_some() {
+            eprintln!("[activate] seed: outer_trap={:?} outer_swi={:?} snapshot_pc={:#010x}", self.pending_trap, self.pending_swi, self.snapshot.pc);
+        }
         let mut core = Arm7tdmiCore::new(bus);
 
         // --- 恢复快照 ---
         core.gpr.copy_from_slice(&self.snapshot.gpr);
-        core.set_reg(15, self.snapshot.pc);
+        // [skyengine] 必须先设�?CPSR 状态（ARM/Thumb）再设置 PC�?
+        // 因为 set_reg(15, val) 会根�?cpsr.state() �?val 做对齐掩码：
+        // ARM �?& !3，Thumb �?& !1。若顺序颠倒，Thumb 地址 0x...a 会被
+        // 错误�?& !3 截断�?0x...8�?
         core.cpsr.set_N(self.snapshot.negative);
         core.cpsr.set_Z(self.snapshot.zero);
         core.cpsr.set_C(self.snapshot.carry);
@@ -156,10 +175,11 @@ impl GuestCpu {
         } else {
             CpuState::ARM
         });
-        // 单一 User/System 场景；bank 视图与通用视图一致。
+        core.set_reg(15, self.snapshot.pc);
+        // 单一 User/System 场景；bank 视图与通用视图一致�?
         core.banks.gpr_banked_r13[0] = self.snapshot.gpr[13];
         core.banks.gpr_banked_r14[0] = self.snapshot.gpr[14];
-        // 流水线重取指：显式 reload 保证 pipeline 有效。
+        // 流水线重取指：显�?reload 保证 pipeline 有效�?
         if self.snapshot.thumb {
             core.reload_pipeline16();
         } else {
@@ -174,8 +194,13 @@ impl ActiveCpu<'_> {
     fn save_back(&mut self) {
         let core = &self.core;
         self.outer.snapshot.gpr.copy_from_slice(&core.gpr);
-        // PC 折算：get_next_pc 是"下一条待执行地址"，与旧核 pc() 一致。
-        self.outer.snapshot.pc = core.get_next_pc();
+        // PC 折算：get_next_pc �?下一条待执行地址"，与旧核 pc() 一致�?
+        let next_pc = core.get_next_pc();
+        if std::env::var_os("SKYENGINE_DEBUG_LOOP").is_some() && next_pc != self.outer.snapshot.pc {
+            eprintln!("[save_back] pc: {:#010x} -> {next_pc:#010x} core.pc={:#010x} thumb={} sp={:#010x}", 
+                self.outer.snapshot.pc, core.pc, core.cpsr.state() == CpuState::THUMB, core.gpr[13]);
+        }
+        self.outer.snapshot.pc = next_pc;
         self.outer.snapshot.thumb = core.cpsr.state() == CpuState::THUMB;
         self.outer.snapshot.negative = core.cpsr.N();
         self.outer.snapshot.zero = core.cpsr.Z();
@@ -184,8 +209,14 @@ impl ActiveCpu<'_> {
         self.outer.snapshot.irq_disabled = core.cpsr.irq_disabled();
         self.outer.snapshot.fiq_disabled = core.cpsr.fiq_disabled();
         self.outer.snapshot.mode_raw = core.cpsr.get() & 0x1f;
-        // 未被 runner 消费的信号回收到外层，等待下一次 activate 播种回去。
-        self.outer.pending_trap = self.core.bus.state.pending_trap.take().or(self.outer.pending_trap);
+        // 未被 runner 消费的信号回收到外层，等待下一�?activate 播种回去�?
+        // [skyengine] 不使�?.or()：如�?bus 没有 pending_trap（已�?take_pending_trap
+        // 消费），�?outer 必须清零，避免后�?activate 重载流水线时恢复已消费的陷阱�?
+        let bus_trap = self.core.bus.state.pending_trap.take();
+        if std::env::var_os("SKYENGINE_DEBUG_LOOP").is_some() {
+            eprintln!("[save_back] bus_trap={bus_trap:?} outer_trap={:?}", self.outer.pending_trap);
+        }
+        self.outer.pending_trap = bus_trap;
         self.outer.sentinel_hit =
             self.outer.sentinel_hit || self.core.bus.state.pending_sentinel_hit;
         self.outer.pending_swi = self.core.bus.state.pending_swi.take().or(self.outer.pending_swi);
@@ -223,6 +254,10 @@ impl ActiveCpu<'_> {
             .cpsr
             .set_state(if thumb { CpuState::THUMB } else { CpuState::ARM });
         self.core.set_reg(15, base);
+        // [skyengine] 先清零过时的陷阱信号：流水线重载可能从新地址
+        // 设置正确�?pending_trap，但如果新地址不在陷阱窗口内，
+        // 旧信号不应残留�?
+        self.core.bus.state.pending_trap = None;
         if thumb {
             self.core.reload_pipeline16();
         } else {
@@ -251,6 +286,9 @@ impl ActiveCpu<'_> {
 
     pub(crate) fn take_pending_trap(&mut self) -> Option<u32> {
         let slot = self.core.bus.state.pending_trap.take();
+        if std::env::var_os("SKYENGINE_DEBUG_LOOP").is_some() {
+            eprintln!("[take_trap] bus_trap={slot:?} outer_trap={:?}", self.outer.pending_trap);
+        }
         if slot.is_some() {
             self.outer.pending_trap = None;
         }
@@ -261,13 +299,18 @@ impl ActiveCpu<'_> {
         self.outer.semihosting_exit_reason.take()
     }
 
-    /// 执行一条指令。
-    /// - 陷阱窗口命中：返回 Ok(Some(slot))；
+    /// 执行一条指令�?
+    /// - 陷阱窗口命中：返�?Ok(Some(slot))�?
     /// - SWI 已被 bus hook 消费：在本步出口用实时寄存器完成半宿主判定，
-    ///   命中 SYS_EXIT 则记录退出原因；未知 SWI 保持旧核的 fail-fast 错误。
+    ///   命中 SYS_EXIT 则记录退出原因；未知 SWI 保持旧核�?fail-fast 错误�?
     pub(crate) fn step(&mut self) -> Result<Option<u32>> {
-        // 进入本步之前遗留的 SWI 判定已在上一步处理；先消费本步标记占位，
-        // core.step() 之后统一读取。
+        // [skyengine] debug: print instruction about to execute
+        if std::env::var_os("SKYENGINE_DEBUG_LOOP").is_some() {
+            let insn = self.core.get_decoded_opcode();
+            let is_thumb = self.core.cpsr.state() == CpuState::THUMB;
+            let insn_fmt = if is_thumb { format!("{:04x}", insn & 0xFFFF) } else { format!("{:08x}", insn) };
+            eprintln!("[step] exec insn={insn_fmt} pc={:#010x} thumb={is_thumb} r0={:#010x} r1={:#010x} r2={:#010x} r3={:#010x} lr={:#010x} sp={:#010x}", self.core.get_next_pc(), self.core.get_reg(0), self.core.get_reg(1), self.core.get_reg(2), self.core.get_reg(3), self.core.get_reg(14), self.core.get_reg(13));
+        }
         self.core.step();
         let state = &mut self.core.bus.state;
 
@@ -278,13 +321,13 @@ impl ActiveCpu<'_> {
                     self.outer.semihosting_exit_reason = Some(self.core.get_reg(1));
                     return Ok(None);
                 }
-                // 与旧核一致：0x123456 但 r0 不是 0x18 时报错而不是继续。
+                // 与旧核一致：0x123456 �?r0 不是 0x18 时报错而不是继续�?
                 return Err(Error::ArmFault(format!(
                     "unsupported semihosting SWI operation r0={:#010x}",
                     self.core.get_reg(0)
                 )));
             }
-            // 其余注释值按旧语义报错（MRP guest 不使用 SVC 向量）。
+            // 其余注释值按旧语义报错（MRP guest 不使�?SVC 向量）�?
             return Err(Error::ArmFault(format!(
                 "unsupported A32 instruction (svc #{comment:#x})"
             )));

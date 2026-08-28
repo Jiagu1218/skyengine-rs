@@ -85,14 +85,43 @@ pub enum ArmFormat {
     /// Tanssfer immediate/register to PSR flags only
     MoveToFlags,
 
+    // [skyengine] BEGIN - ARMv5T/v5TE instruction formats
+    /// BLX immediate (cond=0xF, bits[27:25]=101) — handled in
+    /// step_arm_exec_unconditional, NOT through the LUT.
+    BranchLinkExchange,
+    /// Saturating add/sub (QADD/QSUB/QDADD/QDSUB)
+    SaturatingAddSub,
+    /// Signed halfword multiply (SMLAxy/SMULWy)
+    SignedHalfwordMultiply,
+    // [skyengine] END
+
     Undefined,
 }
 
 impl From<u32> for ArmFormat {
     fn from(raw: u32) -> ArmFormat {
         use ArmFormat::*;
+        // [skyengine] BEGIN - ARMv5T/v5TE formats must be checked first
+        // because they share opcode space with older ARM7TDMI instructions
+        // (e.g. QADD overlaps Multiply, SMLA overlaps HalfwordTransfer).
         if (0x0fff_fff0 & raw) == 0x012f_ff10 {
             BranchExchange
+        } else if (0x0fff_fff0 & raw) == 0x012f_ff30 {
+            // BLX(register): same space as BX but with link
+            BranchExchange
+        } else if (0x0ff0_f090 & raw) == 0x0160_0080 {
+            // SMULWy (signed multiply, no accumulate)
+            SignedHalfwordMultiply
+        } else if (0x0ff0_0090 & raw) == 0x0100_0080 {
+            // SMLAxy (signed multiply with accumulate)
+            SignedHalfwordMultiply
+        } else if (0x0ff0_00f0 & raw) == 0x0100_0050 {
+            // QADD/QSUB/QDADD/QDSUB
+            SaturatingAddSub
+        } else if raw >> 28 == 0xF && (0x0E00_0000 & raw) == 0x0A00_0000 {
+            // BLX immediate (cond=0xF + branch space)
+            BranchLinkExchange
+        // [skyengine] END
         } else if (0x0E00_0000 & raw) == 0x0A00_0000 {
             BranchLink
         } else if (0x0E00_0010 & raw) == 0x0600_0000 {

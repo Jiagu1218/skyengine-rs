@@ -196,6 +196,7 @@ impl GuestMemory {
     /// [skyengine] Bus introspection: whether an address falls inside any
     /// mapped region. Used by the guest bus to distinguish "inside the trap
     /// window" from "unmapped" without altering permission semantics.
+    #[allow(dead_code)]
     pub(crate) fn is_mapped(&self, address: GuestAddr) -> bool {
         let address = u64::from(address.0);
         self.regions
@@ -205,6 +206,7 @@ impl GuestMemory {
 
     /// [skyengine] Bus introspection: the READ/WRITE/EXECUTE permissions of the
     /// region containing `address`, if it is mapped at all.
+    #[allow(dead_code)]
     pub(crate) fn permissions_at(&self, address: GuestAddr) -> Option<Permissions> {
         let address = u64::from(address.0);
         self.regions

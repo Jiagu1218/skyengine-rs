@@ -13,7 +13,38 @@ use MemoryAccess::*;
 use super::ArmDecodeHelper;
 use super::*;
 
+// [skyengine] BEGIN - ARMv5TE signed halfword extraction helper
+/// Extract a signed 16-bit halfword from a 32-bit value.
+/// If `top` is true, extract bits[31:16]; otherwise bits[15:0].
+#[inline]
+fn signed_halfword(value: u32, top: bool) -> i16 {
+    if top {
+        (value >> 16) as i16
+    } else {
+        value as i16
+    }
+}
+// [skyengine] END
+
 impl<I: MemoryInterface> Arm7tdmiCore<I> {
+    // [skyengine] BEGIN - ARMv5T interworking: any instruction that writes
+    // a value to R15/PC must check bit0 of the written value and switch
+    // to Thumb if set (or stay in ARM if clear). This differs from ARMv4T
+    // where data-processing/LDR/LDM-to-PC never changes the T bit.
+    pub(in crate) fn set_pc_interwork(&mut self, value: u32) -> CpuAction {
+        if value.bit(0) {
+            self.cpsr.set_state(CpuState::THUMB);
+            self.pc = value & !1;
+            self.reload_pipeline16();
+        } else {
+            self.cpsr.set_state(CpuState::ARM);
+            self.pc = value & !3;
+            self.reload_pipeline32();
+        }
+        CpuAction::PipelineFlushed
+    }
+    // [skyengine] END
+
     pub fn arm_undefined(&mut self, insn: u32) -> CpuAction {
         panic!(
             "executing undefined arm instruction {:08x} at @{:08x}",
@@ -28,7 +59,8 @@ impl<I: MemoryInterface> Arm7tdmiCore<I> {
         if LINK {
             self.set_reg(REG_LR, (self.pc_arm() + (self.word_size() as u32)) & !0b1);
         }
-        self.pc = (self.pc as i32).wrapping_add(insn.branch_offset()) as u32 & !1;
+        let target = (self.pc as i32).wrapping_add(insn.branch_offset()) as u32 & !3;
+        self.pc = target;
 
         self.reload_pipeline32(); // Implies 2S + 1N
         CpuAction::PipelineFlushed
@@ -61,9 +93,117 @@ impl<I: MemoryInterface> Arm7tdmiCore<I> {
     /// Branch with Link and Exchange (register)
     pub fn exec_arm_blx_reg(&mut self, insn: u32) -> CpuAction {
         let target = self.get_reg(insn.bit_range(0..4) as usize);
-        let link = self.pc_arm() + 4 | u32::from(target.bit(0));
+        let link = (self.pc_arm() + 4) | u32::from(target.bit(0));
         self.set_reg(REG_LR, link);
         self.branch_exchange(target)
+    }
+    // [skyengine] END
+
+    // [skyengine] BEGIN - ARMv5T BLX (immediate offset).
+    // Encoding: 1111 101H offset[23:0]  (cond=0xF, bits[27:25]=101)
+    // Always sets LR = address_of_next_instruction, switches to Thumb,
+    // and branches to (PC + 8 + offset). The H bit (bit 24) contributes
+    // 2 to the offset, allowing halfword-aligned Thumb targets.
+    pub fn exec_arm_blx_imm(&mut self, insn: u32) -> CpuAction {
+        let h = (insn >> 24) & 1;
+        let offset_imm = (insn & 0x00ff_ffff) << 2 | (h << 1);
+        // Sign-extend from 26 bits
+        let offset = ((offset_imm as i32) << 6) >> 6;
+        self.set_reg(REG_LR, (self.pc_arm() + 4) & !0b1);
+        self.cpsr.set_state(CpuState::THUMB);
+        // [skyengine] self.pc already includes the +8 pipeline offset;
+        // do NOT add another +8 (unlike exec_arm_b_bl which uses branch_offset()
+        // that also doesn't add +8). The target is PC + offset, where PC = insn_addr + 8.
+        self.pc = ((self.pc as i32).wrapping_add(offset)) as u32 & !1;
+        self.reload_pipeline16();
+        CpuAction::PipelineFlushed
+    }
+
+    // ARMv5T CLZ (Count Leading Zeros)
+    // Encoding: 1111 0001 1010 Rm 1111 Rd 1111 0001 Rm  (cond=0xF)
+    pub fn exec_arm_clz(&mut self, insn: u32) -> CpuAction {
+        let rd = insn.bit_range(12..16) as usize;
+        let rm = insn.bit_range(0..4) as usize;
+        let val = self.get_reg(rm);
+        let count = val.leading_zeros();
+        self.set_reg(rd, count);
+        self.advance_arm();
+        CpuAction::AdvancePC(MemoryAccess::NonSeq)
+    }
+
+    // ARMv5TE QADD / QSUB / QDADD / QDSUB (saturating arithmetic)
+    // Encoding: cond 0001 00x0 Rm 0000 Rd 0000 01y1 Rn
+    //   x=0: QADD (y=0) or QSUB (y=1)
+    //   x=1: QDADD (y=0) or QDSUB (y=1)
+    pub fn exec_arm_qadd_qsub<const SUB: bool, const DOUBLE: bool>(&mut self, insn: u32) -> CpuAction {
+        let rm = insn.bit_range(0..4) as usize;
+        let rd = insn.bit_range(12..16) as usize;
+        let rn = insn.bit_range(16..20) as usize;
+        let op1 = self.get_reg(rm) as i32;
+        let op2 = self.get_reg(rn) as i32;
+        let operand = if DOUBLE {
+            // QDADD: 2*Rn, saturating
+            let doubled = op2.wrapping_mul(2);
+            if doubled / 2 != op2 {
+                self.cpsr.set_Q(true);
+                if op2 > 0 { i32::MAX } else { i32::MIN }
+            } else {
+                doubled
+            }
+        } else {
+            op2
+        };
+        let result = if SUB {
+            op1.wrapping_sub(operand)
+        } else {
+            op1.wrapping_add(operand)
+        };
+        // Check for saturation
+        let saturated = if !SUB {
+            // Addition overflow
+            (op1 > 0 && operand > 0 && result < 0) || (op1 < 0 && operand < 0 && result > 0)
+        } else {
+            // Subtraction overflow
+            (op1 >= 0 && operand < 0 && result < 0) || (op1 < 0 && operand > 0 && result > 0)
+        };
+        if saturated {
+            self.cpsr.set_Q(true);
+            let sat_val = if !SUB {
+                if result < 0 { i32::MAX } else { i32::MIN }
+            } else {
+                if result < 0 && op1 >= 0 { i32::MAX } else { i32::MIN }
+            };
+            self.set_reg(rd, sat_val as u32);
+        } else {
+            self.set_reg(rd, result as u32);
+        }
+        self.advance_arm();
+        CpuAction::AdvancePC(MemoryAccess::NonSeq)
+    }
+
+    // ARMv5TE SMLAxy / SMULWy (signed halfword multiply)
+    // SMLAxy: cond 0001 0xx0 Rd Rm x y Rs 1 0 0 0 Rn  (accumulate)
+    //   Encoding mask: 0x0FF0_0090 == 0x0100_0080
+    // SMULWy: cond 0001 01x0 Rd Rm 0 0 Rs 1 0 0 0 0
+    //   Encoding mask: 0x0FF0_F090 == 0x0160_0080
+    pub fn exec_arm_smlaxy<const ACCUMULATE: bool>(&mut self, insn: u32) -> CpuAction {
+        let rd = insn.bit_range(16..20) as usize;
+        let rn = insn.bit_range(12..16) as usize;
+        let rs = insn.bit_range(8..12) as usize;
+        let rm = insn.bit_range(0..4) as usize;
+        let x = insn.bit(5); // 0=bottom half, 1=top half of Rm
+        let y = insn.bit(6); // 0=bottom half, 1=top half of Rs
+        let op1 = signed_halfword(self.get_reg(rm), x);
+        let op2 = signed_halfword(self.get_reg(rs), y);
+        let product = (op1 as i32).wrapping_mul(op2 as i32) as u32;
+        let result = if ACCUMULATE {
+            product.wrapping_add(self.get_reg(rn))
+        } else {
+            product
+        };
+        self.set_reg(rd, result);
+        self.advance_arm();
+        CpuAction::AdvancePC(MemoryAccess::NonSeq)
     }
     // [skyengine] END
 
@@ -270,14 +410,20 @@ impl<I: MemoryInterface> Arm7tdmiCore<I> {
 
         let mut result = CpuAction::AdvancePC(Seq);
         if let Some(alu_res) = alu_res {
-            self.set_reg(rd, alu_res);
             if rd == REG_PC {
-                // T bit might have changed
-                match self.cpsr.state() {
-                    CpuState::ARM => self.reload_pipeline32(),
-                    CpuState::THUMB => self.reload_pipeline16(),
-                };
+                // [skyengine] ARM Data Processing writing to PC does NOT interwork
+                // in ARMv4T (ARM7TDMI). Even in ARMv5T, the architecture says
+                // DP-to-PC updates the T bit from bit[0], but the upstream
+                // skyengine interpreter (which MRP code targets) uses
+                // write_arm_register(15, value) = value & !3, staying in ARM mode.
+                // Match upstream: stay in current mode, just write PC aligned.
+                // NOTE: set_reg(15, val) already masks by cpsr.state() (ARM: &!3, Thumb: &!1),
+                // then reload_pipeline32() fetches the next ARM instruction.
+                self.set_reg(rd, alu_res);
+                self.reload_pipeline32();
                 result = CpuAction::PipelineFlushed;
+            } else {
+                self.set_reg(rd, alu_res);
             }
         }
 
@@ -347,8 +493,8 @@ impl<I: MemoryInterface> Arm7tdmiCore<I> {
             self.idle_cycle();
 
             if dest_reg == REG_PC {
-                self.reload_pipeline32();
-                result = CpuAction::PipelineFlushed;
+                // [skyengine] ARMv5T: LDR-to-PC must interwork on bit0
+                result = self.set_pc_interwork(data);
             }
         } else {
             let value = if dest_reg == REG_PC {
@@ -452,8 +598,8 @@ impl<I: MemoryInterface> Arm7tdmiCore<I> {
             self.idle_cycle();
 
             if dest_reg == REG_PC {
-                self.reload_pipeline32();
-                result = CpuAction::PipelineFlushed;
+                // [skyengine] ARMv5T: halfword LDR-to-PC must interwork on bit0
+                result = self.set_pc_interwork(data);
             }
         } else {
             let value = if dest_reg == REG_PC {
@@ -561,8 +707,8 @@ impl<I: MemoryInterface> Arm7tdmiCore<I> {
                             if psr_transfer {
                                 self.transfer_spsr_mode();
                             }
-                            self.reload_pipeline32();
-                            result = CpuAction::PipelineFlushed;
+                            // [skyengine] ARMv5T: LDM-to-PC must interwork on bit0
+                            result = self.set_pc_interwork(val);
                         }
                         if !full {
                             addr = addr.wrapping_add(4);
@@ -609,9 +755,8 @@ impl<I: MemoryInterface> Arm7tdmiCore<I> {
         } else {
             if LOAD {
                 let val = self.ldr_word(addr, NonSeq);
-                self.set_reg(REG_PC, val & !3);
-                self.reload_pipeline32();
-                result = CpuAction::PipelineFlushed;
+                // [skyengine] ARMv5T: LDM-to-PC must interwork on bit0
+                result = self.set_pc_interwork(val);
             } else {
                 // block data store with empty rlist
                 let addr = match (ascending, full) {

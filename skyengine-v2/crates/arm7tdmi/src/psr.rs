@@ -136,6 +136,18 @@ impl RegPSR {
     pub fn set_V(&mut self, flag: bool) {
         self.raw.set_bit(28, flag);
     }
+
+    // [skyengine] BEGIN - ARMv5TE Q (saturation/sticky overflow) flag, bit 27
+    #[allow(non_snake_case)]
+    pub fn Q(&self) -> bool {
+        self.raw.bit(27)
+    }
+
+    #[allow(non_snake_case)]
+    pub fn set_Q(&mut self, flag: bool) {
+        self.raw.set_bit(27, flag);
+    }
+    // [skyengine] END
 }
 
 impl fmt::Display for RegPSR {

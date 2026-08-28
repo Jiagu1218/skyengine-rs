@@ -173,13 +173,32 @@ impl<I: MemoryInterface> Arm7tdmiCore<I> {
         let mut result = CpuAction::AdvancePC(Seq);
         match op {
             OpFormat5::BX => {
+                // [skyengine] ARMv5T: Thumb BLX Rm vs BX Rm
+                // In the Thumb encoding, op=3 with H1=1 (FLAG_H1=true) is BLX Rm,
+                // which sets LR = address of next instruction | 1 before branching.
+                // H1=0 is plain BX Rm (no link).
+                if FLAG_H1 {
+                    // BLX Rm: LR = next_instruction_address | 1
+                    // In our pipeline model, self.pc is 2 ahead of the current insn
+                    // (pipeline[0] is at pc-4, pipeline[1] at pc-2 in Thumb).
+                    // The next Thumb instruction after the current one is at pc-2,
+                    // so LR = (pc - 2) | 1.
+                    self.gpr[REG_LR] = (self.pc.wrapping_sub(2)) | 1;
+                }
                 return self.branch_exchange(self.get_reg(src_reg));
             }
             OpFormat5::ADD => {
-                self.set_reg(dst_reg, op1.wrapping_add(op2));
+                let add_result = op1.wrapping_add(op2);
                 if dst_reg == REG_PC {
+                    // [skyengine] ARMv5T: Thumb ADD-to-PC does NOT interwork.
+                    // Per ARM architecture, only BX/BLX perform interworking.
+                    // ADD-to-PC stays in the current execution state (Thumb)
+                    // and just writes the result to PC (aligned to halfword).
+                    self.pc = add_result & !1;
                     self.reload_pipeline16();
                     result = CpuAction::PipelineFlushed;
+                } else {
+                    self.set_reg(dst_reg, add_result);
                 }
             }
             OpFormat5::CMP => {
@@ -189,10 +208,15 @@ impl<I: MemoryInterface> Arm7tdmiCore<I> {
                 self.alu_update_flags(result, true, carry, overflow);
             }
             OpFormat5::MOV => {
-                self.set_reg(dst_reg, op2);
                 if dst_reg == REG_PC {
+                    // [skyengine] ARMv5T: Thumb MOV-to-PC does NOT interwork.
+                    // Per ARM architecture, only BX/BLX perform interworking.
+                    // MOV-to-PC stays in Thumb mode and writes result aligned.
+                    self.pc = op2 & !1;
                     self.reload_pipeline16();
                     result = CpuAction::PipelineFlushed;
+                } else {
+                    self.set_reg(dst_reg, op2);
                 }
             }
         }
@@ -427,10 +451,13 @@ impl<I: MemoryInterface> Arm7tdmiCore<I> {
                 }
             }
             if FLAG_R {
-                pop!(REG_PC);
-                self.pc &= !1;
-                result = CpuAction::PipelineFlushed;
-                self.reload_pipeline16();
+                // [skyengine] ARMv5T: POP {PC} must interwork on bit0.
+                // Read the raw value from the stack and pass it directly to
+                // set_pc_interwork — do NOT go through set_reg(15, val) first,
+                // because set_reg strips bit0 in Thumb mode, losing the interworking signal.
+                let pc_val = self.load_32(self.gpr[REG_SP] & !3, Seq);
+                self.gpr[REG_SP] += 4;
+                result = self.set_pc_interwork(pc_val);
             }
             // Idle 1 cycle
             self.idle_cycle();
@@ -572,6 +599,21 @@ impl<I: MemoryInterface> Arm7tdmiCore<I> {
             CpuAction::AdvancePC(Seq) // 1S
         }
     }
+
+    // [skyengine] BEGIN - ARMv5T Thumb BLX (Thumb→ARM interworking)
+    // Second halfword encoding: 11101 imm11  (0xE800..0xEFFF)
+    // Like BL second half but switches to ARM state and aligns PC to word.
+    pub(in super::super) fn exec_thumb_blx_arm(&mut self, insn: u16) -> CpuAction {
+        use super::super::CpuState;
+        let off = (insn.offset11() as u32) << 1;
+        let target = (self.gpr[REG_LR] & !1).wrapping_add(off);
+        self.gpr[REG_LR] = (self.pc - 2) | 1;
+        self.cpsr.set_state(CpuState::ARM);
+        self.pc = target & !3;
+        self.reload_pipeline32();
+        CpuAction::PipelineFlushed
+    }
+    // [skyengine] END
 
     pub fn thumb_undefined(&mut self, insn: u16) -> CpuAction {
         panic!(

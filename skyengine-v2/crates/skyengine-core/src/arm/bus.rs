@@ -30,6 +30,7 @@ pub(crate) struct GuestBusState {
     /// 取指落入陷阱窗口时记录的槽位（等待主循环派发）。
     pub pending_trap: Option<u32>,
     /// `swi #0x123456` 且 r0==0x18 时记录的退出原因。
+    #[allow(dead_code)]
     pub semihosting_exit_reason: Option<u32>,
     /// 未映射/越权访问的故障描述；在下一次 step 出口转为 `Err`。
     pub fault: Option<String>,
@@ -71,6 +72,25 @@ impl MemoryInterface for GuestBus<'_> {
 
     fn load_16(&mut self, addr: u32, _access: MemoryAccess) -> u16 {
         let addr = addr & !1;
+        // [skyengine] Thumb 取指也需要弹床拦截：当 guest 在 Thumb 模式下
+        // bx lr 跳到 RETURN_SENTINEL 或落入陷阱窗口时，CPU 通过 load_16
+        // 取指。必须与 load_32 一致地设置 pending 标记并返回有效指令。
+        let in_trap_window =
+            (BUS_TRAP_BASE..BUS_TRAP_BASE + BUS_TRAP_SLOT_COUNT * 4).contains(&(addr & !3));
+        let is_sentinel = (addr & !3) >= 0xffff_ff00;
+        if in_trap_window || is_sentinel {
+            if in_trap_window {
+                let slot = ((addr & !3) - BUS_TRAP_BASE) / 4;
+                self.state.pending_trap = Some(slot);
+            } else {
+                self.state.pending_sentinel_hit = true;
+            }
+            // ARM `bx lr` 的低 16 位 = 0xFF1E，在 Thumb 解码空间里
+            // 不合法，但下一步 step 出口会因 pending_sentinel_hit 而
+            // 终止，不会真正执行。返回一个安全的 Thumb 指令：`bx lr`
+            // (0x4770)。
+            return 0x4770; // Thumb bx lr
+        }
         match self.memory.read_u16(GuestAddr(addr)) {
             Ok(value) => value,
             Err(error) => {
@@ -86,7 +106,7 @@ impl MemoryInterface for GuestBus<'_> {
         // 并把 SENTINEL 记为特殊槽位，使“执行到返回哨兵”表现为一条正常指令。
         // RUNNER 在 step 出口检查该标记并结束调用。
         let in_trap_window =
-            aligned >= BUS_TRAP_BASE && aligned < BUS_TRAP_BASE + BUS_TRAP_SLOT_COUNT * 4;
+            (BUS_TRAP_BASE..BUS_TRAP_BASE + BUS_TRAP_SLOT_COUNT * 4).contains(&aligned);
         let is_sentinel = aligned >= 0xffff_ff00;
         let _ = RETURN_SENTINEL_BASE;
         if in_trap_window || is_sentinel {

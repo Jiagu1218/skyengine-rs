@@ -180,6 +180,7 @@ struct GuestFunction {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct GuestExecution {
     function: GuestFunction,
     entered_guest_call: Option<bool>,
@@ -846,6 +847,11 @@ impl ExtRuntime {
             mtk_native_extension_owner: self.mtk_native_extension_owner,
         };
         // [skyengine] 模块页向上取整到 MODULE_STRIDE：vendored 内核的流水线会
+        // [DEBUG] Dump first 32 bytes of EXT module image
+        if std::env::var_os("SKYENGINE_DEBUG_LOOP").is_some() {
+            let hex: String = image.iter().take(32).map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+            eprintln!("[ext-load] module={module_index} base={:#010x} len={} first32={hex}", base.0, image.len());
+        }
         // 预取 PC 之后的两条指令，紧邻镜像尾的代码（如结尾 SVC/BX）需要合法取指。
         let padded_len = image.len().next_multiple_of(MODULE_STRIDE as usize);
         self.memory.map_bytes(
@@ -1800,10 +1806,14 @@ impl ExtRuntime {
         let mut entered_guest_call: Option<bool> = None;
         let mut instruction_count: u64 = 0;
         let trace_arm = std::env::var_os("SKYENGINE_TRACE_ARM").is_some();
+        let debug_loop = std::env::var_os("SKYENGINE_DEBUG_LOOP").is_some();
         while instruction_count < INSTRUCTION_BUDGET {
             let (pc, pending_trap) = {
                 let mut active = cpu.activate(&mut self.memory);
-                (active.pc(), active.take_pending_trap())
+                let p = active.pc();
+                let t = active.take_pending_trap();
+                if debug_loop { eprintln!("[loop] n={instruction_count} pc={p:#010x} trap={t:?} r0={:#010x} r1={:#010x} r2={:#010x} r3={:#010x} r4={:#010x} r5={:#010x} r6={:#010x} r7={:#010x} r8={:#010x} r9={:#010x} r10={:#010x} r11={:#010x} r12={:#010x} lr={:#010x} sp={:#010x} cpsr={:#010x}", active.register(0), active.register(1), active.register(2), active.register(3), active.register(4), active.register(5), active.register(6), active.register(7), active.register(8), active.register(9), active.register(10), active.register(11), active.register(12), active.register(14), active.register(13), active.cpsr()); }
+                (p, t)
             };
             if let Some(return_to_thumb) = entered_guest_call.take()
                 && self.try_dispatch_legacy_external_action(
@@ -1817,12 +1827,12 @@ impl ExtRuntime {
             }
             // [skyengine] RETURN_SENTINEL 取指已被 bus 弹床拦截：
             // 当本步执行的是 SENTINEL 处的 bx lr 时，视为 guest 调用结束。
-            {
+            // 使用静态检查避免 activate 重载流水线导致 pending_trap 被意外恢复。
+            if cpu.is_sentinel_hit_static() {
+                // 需要一次 activate 来读取 r0
                 let mut active = cpu.activate(&mut self.memory);
-                if active.is_sentinel_hit() {
-                    let result = active.register(0);
-                    return Ok(result);
-                }
+                let result = active.register(0);
+                return Ok(result);
             }
             let slot = trap_slot(pc).or(pending_trap);
             if let Some(slot) = slot {
@@ -1844,6 +1854,7 @@ impl ExtRuntime {
                     });
                 }
                 let return_address = cpu.register_static(14);
+                cpu.clear_pending_trap();
                 cpu.activate(&mut self.memory).set_pc(return_address);
                 instruction_count += 1;
                 continue;

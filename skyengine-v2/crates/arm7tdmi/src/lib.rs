@@ -36,6 +36,13 @@ pub mod psr;
 mod simple_memory;
 pub use simple_memory::SimpleMemory;
 
+// [skyengine] BEGIN - hotpath tests from real MRP disasm (task 2.4)
+#[cfg(test)]
+mod hotpath_tests {
+    include!("hotpath_tests.inc");
+}
+// [skyengine] END
+
 pub mod registers_consts {
     pub const REG_PC: usize = 15;
     pub const REG_LR: usize = 14;

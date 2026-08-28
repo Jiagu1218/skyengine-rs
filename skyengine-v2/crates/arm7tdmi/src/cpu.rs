@@ -365,6 +365,24 @@ impl<I: MemoryInterface> Arm7tdmiCore<I> {
         (arm_info.handler_fn)(self, insn)
     }
 
+    // [skyengine] BEGIN - ARMv5T unconditional instruction space (cond=0xF).
+    // BLX immediate is the primary user; CLZ also lives here.
+    fn step_arm_exec_unconditional(&mut self, insn: u32) -> CpuAction {
+        // BLX immediate: bits[27:25] = 101
+        if insn & 0x0E00_0000 == 0x0A00_0000 {
+            return self.exec_arm_blx_imm(insn);
+        }
+        // CLZ: 0x0FFF_0FF0 == 0x016F_0F10
+        if insn & 0x0FFF_0FF0 == 0x016F_0F10 {
+            return self.exec_arm_clz(insn);
+        }
+        // Unknown unconditional — treat as NOP / advance
+        self.advance_arm();
+        self.next_fetch_access = MemoryAccess::NonSeq;
+        CpuAction::AdvancePC(MemoryAccess::NonSeq)
+    }
+    // [skyengine] END
+
     fn step_thumb_exec(&mut self, insn: u16) -> CpuAction {
         let thumb_info = &Self::THUMB_LUT[(insn >> 6) as usize];
         #[cfg(feature = "debugger")]
@@ -379,11 +397,15 @@ impl<I: MemoryInterface> Arm7tdmiCore<I> {
     /// 2S + 1N
     #[inline(always)]
     pub fn reload_pipeline16(&mut self) {
+        let before_pc = self.pc;
         self.pipeline[0] = self.load_16(self.pc, NonSeq) as u32;
         self.advance_thumb();
         self.pipeline[1] = self.load_16(self.pc, Seq) as u32;
         self.advance_thumb();
         self.next_fetch_access = Seq;
+        if std::env::var_os("SKYENGINE_DEBUG_LOOP").is_some() && self.pc != before_pc + 4 {
+            eprintln!("[reload16] ANOMALY: before={before_pc:#010x} after={:#010x} expected={:#010x}", self.pc, before_pc + 4);
+        }
     }
 
     /// 2S + 1N
@@ -428,7 +450,23 @@ impl<I: MemoryInterface> Arm7tdmiCore<I> {
                 let insn = self.pipeline[0];
                 self.pipeline[0] = self.pipeline[1];
                 self.pipeline[1] = fetched_now;
-                let cond = ArmCond::from_u8(insn.bit_range(28..32) as u8)
+                // [skyengine] BEGIN - ARMv5T: cond=0xF is the unconditional
+                // extension space (BLX immediate, CLZ, etc.), NOT an invalid
+                // condition. Must be intercepted before the normal cond check,
+                // which treats ArmCond::Invalid as "condition failed".
+                let cond_raw = insn.bit_range(28..32) as u8;
+                if cond_raw == 0xF {
+                    match self.step_arm_exec_unconditional(insn) {
+                        CpuAction::AdvancePC(access) => {
+                            self.next_fetch_access = access;
+                            self.advance_arm();
+                        }
+                        CpuAction::PipelineFlushed => {}
+                    }
+                    return;
+                }
+                // [skyengine] END
+                let cond = ArmCond::from_u8(cond_raw)
                     .unwrap_or_else(|| unsafe { std::hint::unreachable_unchecked() });
                 if cond != ArmCond::AL && !self.check_arm_cond(cond) {
                     self.advance_arm();

@@ -21,4 +21,5 @@ bit = "0.1.1"
 
 [features]
 default = []
+debugger = []
 disasm = ["dep:byteorder"]
