@@ -3,6 +3,10 @@
 用 Rust 实现的斯凯 Mythroad（MRP）应用运行时：在一个内核里同时跑三类 MRP 应用——
 原生 ARM 应用（LLE，真 dsm_gm 内核）、DSR/MR 脚本应用，以及内嵌 J2ME（jar）应用。
 
+本项目衍生自 [open-skyengine/skyengine-v2](https://github.com/open-skyengine/skyengine-v2)
+（内核上游），此后已大幅偏离：J2ME KVM、Thumb/Java 双 JIT、渲染零拷贝热路径、
+v2060 应用列表适配等均为本仓库独立演进。
+
 ## 执行 lanes
 
 | Lane | 路线 | 说明 |
