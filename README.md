@@ -11,7 +11,7 @@ v2060 应用列表适配等均为本仓库独立演进。
 
 | Lane | 路线 | 说明 |
 | --- | --- | --- |
-| 原生 ARM MRP | LLE | 真实 dsm_gm 内核二进制在 ARM/Thumb 模拟层中执行；EXT 服务桥（文件/绘图/文本/音频/网络/定时器/RMS）由宿主实现，内核行为 1:1 |
+| 原生 ARM MRP | LLE | 每个 MRP 包内嵌的 ARM EXT 镜像（logo.ext/游戏代码等）在 ARM/Thumb 模拟层中真实执行，调用宿主实现的服务表（文件/绘图/文本/音频/网络/定时器/RMS），与真机语义 1:1 |
 | DSM 脚本 MRP | 宿主 VM | `\x1bMRP` 预编译脚本字节码由内置寄存器机（MrVm）解释执行 |
 | J2ME MRP | KVM | 内核经 `platEx(0x70003)` 注册 J2ME 引擎后，MIDlet 套件（jc.jar）在自带 KVM 中运行：CLDC/MIDP 子集 + Canvas/Game API + RMS + HTTP + 基础多媒体，Java 侧热路径有 baseline JIT 加速 |
 
@@ -66,10 +66,13 @@ cargo run --release -p skyengine -- run \
 ```text
 <work-dir>/
   mythroad/
-    dsm_gm.mrp          # 平台内核
-    app.mrp             # 应用
+    app.mrp             # 应用（各自的 start.mr 自举，直接运行即可）
     system/gb16.uc2     # 字体
     plugins/*.mrp       # 插件（netpay 等）
+    dsm_gm.mrp          # 平台应用（应用列表/启动器，可选）：
+                        #   真机上常驻并负责启动其它 MRP；本引擎中它只是
+                        #   一个普通 MRP，运行它可获得列表 UI，并经应用栈
+                        #   启动其它应用。直接运行单个 MRP 时无需它。
 ```
 
 常用运行时开关（环境变量，默认全部关闭）：
