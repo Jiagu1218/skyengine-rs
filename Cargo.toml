@@ -1,0 +1,47 @@
+[workspace]
+members = [
+    "apps/skyengine",
+    "apps/skydbg",
+    "crates/skyengine-arm",
+    "crates/skyengine-core",
+    "crates/skyengine-ffi",
+    "crates/skyengine-jit",
+    "crates/skyengine-kvm",
+    "crates/skyengine-sdl",
+]
+resolver = "2"
+
+# tracing-subscriber (pulled in by rvoip-codec-core) colours its output with
+# nu-ansi-term, which depends on windows-sys; on the GNU host toolchain
+# windows-sys needs dlltool+as from a MinGW install we do not ship. skyengine
+# never renders tracing output, so replace nu-ansi-term with a local no-op
+# shim that keeps the API surface without emitting escape codes.
+[patch.crates-io]
+nu-ansi-term = { path = "shims/nu-ansi-term" }
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+encoding_rs = "0.8.35"
+flate2 = "1.1.2"
+jpeg-decoder = { version = "0.3.2", default-features = false }
+midly = { version = "0.5.3", default-features = false, features = ["std"] }
+rustysynth = "1.3.6"
+rvoip-codec-core = { version = "0.3.10", default-features = false, features = ["amr"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.142"
+sdl2 = "0.38.0"
+# aac/isomp4 let the generic probe handle M4A (device 6); alac is included
+# because some M4A files in the wild use the Apple Lossless codec instead.
+# wav+adpcm back the compressed-WAV fallback in decode_wav (MRP games ship
+# IMA ADPCM .wav assets that the raw PCM reader rejects).
+symphonia = { version = "0.5.5", default-features = false, features = ["aac", "adpcm", "alac", "isomp4", "mp3", "wav"] }
+thiserror = "2.0.12"
+
+[profile.release]
+# ThinLTO can leave Rust symbols unresolved in MSVC static and dynamic libraries.
+lto = "fat"
+strip = "debuginfo"

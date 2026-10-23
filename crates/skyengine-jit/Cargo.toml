@@ -1,0 +1,8 @@
+[package]
+name = "skyengine-jit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Executable-memory probing and JIT support for SkyEngine (falls back to interpretation)"
+
+[dependencies]

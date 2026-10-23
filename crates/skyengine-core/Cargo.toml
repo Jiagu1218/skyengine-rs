@@ -1,0 +1,19 @@
+[package]
+name = "skyengine-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+skyengine-arm = { path = "../skyengine-arm" }
+skyengine-jit = { path = "../skyengine-jit" }
+skyengine-kvm = { path = "../skyengine-kvm" }
+encoding_rs.workspace = true
+flate2.workspace = true
+jpeg-decoder.workspace = true
+midly.workspace = true
+rvoip-codec-core.workspace = true
+rustysynth.workspace = true
+serde.workspace = true
+symphonia.workspace = true
+thiserror.workspace = true

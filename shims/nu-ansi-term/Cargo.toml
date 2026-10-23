@@ -1,0 +1,8 @@
+[package]
+name = "nu-ansi-term"
+version = "0.50.3"
+edition = "2021"
+description = "No-op shim replacing nu-ansi-term to avoid its windows-sys dependency (GNU host needs dlltool+as)"
+license = "MIT"
+
+[dependencies]

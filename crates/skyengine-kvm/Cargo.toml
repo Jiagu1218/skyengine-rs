@@ -1,0 +1,15 @@
+[package]
+name = "skyengine-kvm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# 自研 J2ME KVM（CLDC-1.1 + MIDP-2.0）。
+# 约束（plan.md 结构决策）：本 crate 不依赖任何 skyengine crate，
+# 依赖方向仅 core→kvm；外部依赖只从 workspace 取。
+[dependencies]
+flate2.workspace = true
+midly.workspace = true
+rustysynth.workspace = true
+symphonia.workspace = true
+thiserror.workspace = true
